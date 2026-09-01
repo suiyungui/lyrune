@@ -403,16 +403,59 @@ impl ProtocolClient {
             offset = offset.saturating_add(page.len() as u64);
         }
 
+        let favorite_albums = self.favorite_albums(credential, &current).await?;
+
         let mut seen = HashSet::new();
-        let mut playlists = Vec::with_capacity(1 + created.len() + favorites.len());
+        let mut playlists =
+            Vec::with_capacity(1 + created.len() + favorites.len() + favorite_albums.len());
         seen.insert(liked.id.clone());
         playlists.push(liked);
-        for playlist in created.into_iter().chain(favorites) {
+        for playlist in created
+            .into_iter()
+            .chain(favorites)
+            .chain(favorite_albums)
+        {
             if seen.insert(playlist.id.clone()) {
                 playlists.push(playlist);
             }
         }
         Ok(playlists)
+    }
+
+    async fn favorite_albums(
+        &self,
+        credential: &CredentialSession,
+        current: &QqCredential,
+    ) -> Result<Vec<UserPlaylist>> {
+        let mut albums = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let data = self
+                .call_with_session(
+                    "music.musicasset.AlbumFavRead",
+                    "CgiGetAlbumFavInfo",
+                    json!({
+                        "euin": current.encrypted_uin,
+                        "offset": offset,
+                        "size": 100,
+                    }),
+                    credential,
+                    current,
+                    None,
+                )
+                .await
+                .context("无法加载用户收藏的 QQ 音乐专辑")?;
+            let page = find_array_recursively(&data, &["v_list"])
+                .cloned()
+                .unwrap_or_default();
+            albums.extend(page.iter().filter_map(parse_favorite_album));
+            let has_more = bool_field(&data, &["hasmore", "has_more"]).unwrap_or(false);
+            if !has_more || page.is_empty() {
+                break;
+            }
+            offset = offset.saturating_add(page.len() as u64);
+        }
+        Ok(albums)
     }
 
     pub async fn recommended_playlists(
@@ -1426,6 +1469,26 @@ fn parse_created_playlist(value: &Value) -> Option<UserPlaylist> {
 fn parse_favorite_playlist(value: &Value) -> Option<UserPlaylist> {
     let diss_id = integer_field(value, &["dissid", "tid", "id"])?;
     parse_playlist_summary(value, UserPlaylistId::Favorite { diss_id })
+}
+
+fn parse_favorite_album(value: &Value) -> Option<UserPlaylist> {
+    let mid = string_field(value, &["mid", "albumMid"])?;
+    let mut playlist = parse_playlist_summary(value, UserPlaylistId::Album { mid: mid.clone() })?;
+    if playlist.owner.is_empty() {
+        let singers = value
+            .get("v_singer")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|singer| string_field(singer, &["name", "nickname", "nick"]))
+            .filter(|name| !name.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !singers.is_empty() {
+            playlist.owner = singers.join("/");
+        }
+    }
+    playlist.cover_url = playlist.cover_url.or_else(|| album_cover_url(&mid));
+    Some(playlist)
 }
 
 fn parse_recommended_playlist_page(data: &Value, offset: u64) -> Result<SearchPage<UserPlaylist>> {
