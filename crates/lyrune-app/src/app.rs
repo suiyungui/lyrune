@@ -2215,7 +2215,6 @@ pub struct LyruneView {
     credential: Option<CredentialSession>,
     profile: Option<UserProfile>,
     qr_image: Option<Arc<Image>>,
-    library_loading: bool,
     selected_playlist_index: Option<usize>,
     selected_playlist: Option<UserPlaylist>,
     selected_playlist_resource: Option<SharedPlaylistResource>,
@@ -2567,7 +2566,6 @@ impl LyruneView {
             credential: None,
             profile: None,
             qr_image: None,
-            library_loading: false,
             selected_playlist_index: None,
             selected_playlist: None,
             selected_playlist_resource: None,
@@ -4074,7 +4072,6 @@ impl LyruneView {
                 LIBRARY_CACHE_TTL,
             )
         {
-            self.library_loading = false;
             self.apply_library(account_id, profile, playlists, false, cx);
             self.validate_cached_credential(cx);
             return;
@@ -4086,7 +4083,6 @@ impl LyruneView {
         };
         self.library_generation = self.library_generation.wrapping_add(1);
         let generation = self.library_generation;
-        self.library_loading = true;
         cx.notify();
         let task = RUNTIME.spawn(async move {
             tokio::time::timeout(Duration::from_secs(30), async {
@@ -4107,7 +4103,6 @@ impl LyruneView {
                 if this.library_generation != generation {
                     return;
                 }
-                this.library_loading = false;
                 match result {
                     Ok((profile, playlists)) => {
                         this.library_cache.replace_directory(
@@ -6389,7 +6384,6 @@ impl LyruneView {
         self.liked_toggle_loading.clear();
         self.profile = None;
         self.qr_image = None;
-        self.library_loading = false;
         self.favorite_collection.clear();
         self.favorite_collection_loading = false;
         self.favorite_collection_error = None;
@@ -7072,56 +7066,34 @@ impl LyruneView {
             .bg(theme.sidebar)
             .child(logo)
             .child(
-                h_flex()
-                    .h(px(60.))
-                    .px_5()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(34.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(media_icon_hsla(
-                                        MediaIcon::Library,
-                                        theme.secondary_foreground,
-                                        px(20.),
-                                    )),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_0p5()
-                                    .child(div().font_semibold().child("音乐库"))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child("你的 QQ 音乐歌单"),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        Button::new("reload-library")
-                            .ghost()
-                            .rounded(px(999.))
-                            .size(px(44.))
-                            .p_0()
-                            .tooltip("重新加载歌单")
-                            .disabled(self.library_loading)
-                            .loading(self.library_loading)
-                            .when(!self.library_loading, |button| {
-                                button.child(media_icon_hsla(
-                                    MediaIcon::Refresh,
+                h_flex().h(px(60.)).px_5().justify_between().child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size(px(34.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(media_icon_hsla(
+                                    MediaIcon::Library,
                                     theme.secondary_foreground,
-                                    px(18.),
-                                ))
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.load_library(true, cx))),
-                    ),
+                                    px(20.),
+                                )),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_0p5()
+                                .child(div().font_semibold().child("音乐库"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("你的 QQ 音乐歌单"),
+                                ),
+                        ),
+                ),
             )
             .child(
                 div()
@@ -7368,21 +7340,6 @@ impl LyruneView {
                                                 .disabled(!has_tracks)
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.select_track(0, cx)
-                                                })),
-                                        )
-                                    })
-                                    .when(is_favorite_collection, |row| {
-                                        row.child(
-                                            Button::new("reload-favorite-albums")
-                                                .outline()
-                                                .rounded(px(999.))
-                                                .h(px(44.))
-                                                .px_4()
-                                                .label("刷新")
-                                                .disabled(self.favorite_collection_loading)
-                                                .loading(self.favorite_collection_loading)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.load_favorite_collection(cx)
                                                 })),
                                         )
                                     }),
