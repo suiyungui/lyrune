@@ -248,6 +248,8 @@ pub enum UserPlaylistId {
     Recommended { diss_id: u64 },
     Artist { mid: String },
     Album { mid: String },
+    FavoriteAlbums,
+    FavoritePlaylists,
     Search { query: String },
     Recommendation { kind: RecommendationKind },
 }
@@ -284,6 +286,30 @@ impl UserPlaylist {
             title: "已点赞的歌曲".to_owned(),
             cover_url: None,
             description: "QQ 音乐中已收藏的歌曲".to_owned(),
+            owner: String::new(),
+            owner_avatar_url: None,
+            track_count: 0,
+        }
+    }
+
+    pub fn favorite_albums() -> Self {
+        Self {
+            id: UserPlaylistId::FavoriteAlbums,
+            title: "已点赞的专辑".to_owned(),
+            cover_url: None,
+            description: "QQ 音乐中已收藏的专辑".to_owned(),
+            owner: String::new(),
+            owner_avatar_url: None,
+            track_count: 0,
+        }
+    }
+
+    pub fn favorite_playlists() -> Self {
+        Self {
+            id: UserPlaylistId::FavoritePlaylists,
+            title: "收藏的歌单".to_owned(),
+            cover_url: None,
+            description: "QQ 音乐中已收藏的歌单".to_owned(),
             owner: String::new(),
             owner_avatar_url: None,
             track_count: 0,

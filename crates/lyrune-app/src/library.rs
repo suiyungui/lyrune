@@ -210,7 +210,11 @@ pub fn playlist_cover(
         .items_center()
         .justify_center()
         .child(media_icon_hsla(
-            MediaIcon::Folder,
+            match playlist.id {
+                UserPlaylistId::FavoriteAlbums => MediaIcon::Album,
+                UserPlaylistId::FavoritePlaylists => MediaIcon::Playlist,
+                _ => MediaIcon::Folder,
+            },
             cx.theme().secondary_foreground,
             size * 0.38,
         ))
@@ -663,6 +667,8 @@ fn playlist_subtitle(playlist: &UserPlaylist) -> String {
         UserPlaylistId::Recommended { .. } => "推荐歌单",
         UserPlaylistId::Artist { .. } => "歌手",
         UserPlaylistId::Album { .. } => "专辑",
+        UserPlaylistId::FavoriteAlbums => return "收藏的专辑".to_owned(),
+        UserPlaylistId::FavoritePlaylists => return "收藏的歌单".to_owned(),
         UserPlaylistId::Search { .. } => "搜索结果",
         UserPlaylistId::Recommendation { .. } => "个性化推荐",
     };

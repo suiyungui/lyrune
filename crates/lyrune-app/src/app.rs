@@ -2298,6 +2298,11 @@ pub struct LyruneView {
     color_theme: ColorTheme,
     settings: AppSettings,
     library_cache: LibraryCache,
+    favorite_collection: Vec<UserPlaylist>,
+    favorite_collection_loading: bool,
+    favorite_collection_loaded: bool,
+    favorite_collection_error: Option<String>,
+    favorite_collection_generation: u64,
     page_resource_cache: PageResourceCache,
     liked_tracks: HashMap<String, bool>,
     liked_state_loading: HashSet<String>,
@@ -2643,6 +2648,11 @@ impl LyruneView {
             color_theme,
             settings,
             library_cache,
+            favorite_collection: Vec::new(),
+            favorite_collection_loading: false,
+            favorite_collection_loaded: false,
+            favorite_collection_error: None,
+            favorite_collection_generation: 0,
             page_resource_cache: PageResourceCache::default(),
             liked_tracks: HashMap::new(),
             liked_state_loading: HashSet::new(),
@@ -3973,6 +3983,85 @@ impl LyruneView {
         .detach();
     }
 
+    fn load_favorite_collection(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
+        if self.favorite_collection_loading || (!force_refresh && self.favorite_collection_loaded) {
+            return;
+        }
+        let is_playlists = match self.selected_playlist.as_ref().map(|playlist| &playlist.id) {
+            Some(UserPlaylistId::FavoriteAlbums) => false,
+            Some(UserPlaylistId::FavoritePlaylists) => true,
+            _ => return,
+        };
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.favorite_collection_error = Some("QQ 音乐客户端不可用".to_owned());
+            cx.notify();
+            return;
+        };
+        self.favorite_collection_loading = true;
+        self.favorite_collection_error = None;
+        self.favorite_collection_generation = self.favorite_collection_generation.wrapping_add(1);
+        let generation = self.favorite_collection_generation;
+        cx.notify();
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                if is_playlists {
+                    client.favorite_playlists(&credential).await
+                } else {
+                    client.favorite_albums(&credential).await
+                }
+            })
+            .await
+            .context("QQ 音乐收藏请求等待超过 30 秒")?
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.favorite_collection_generation != generation {
+                    return;
+                }
+                this.favorite_collection_loading = false;
+                match result {
+                    Ok(items) => {
+                        this.favorite_collection = items;
+                        this.favorite_collection_loaded = true;
+                    }
+                    Err(error) => {
+                        this.favorite_collection_error = Some(format!("加载收藏失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_favorite_collection(
+        &mut self,
+        playlist: UserPlaylist,
+        selected_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.main_content = MainContent::Playlist;
+        self.search_resource = None;
+        self.artist_resource = None;
+        self.selected_playlist_resource = None;
+        self.selected_playlist = Some(playlist);
+        self.selected_playlist_index = selected_index;
+        if let Some(index) = selected_index {
+            self.playlist_list.update(cx, |list, cx| {
+                list.delegate_mut().set_selected(index);
+                cx.notify();
+            });
+        }
+        self.load_favorite_collection(true, cx);
+        cx.notify();
+    }
+
     fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
         let Some(credential) = self.credential.clone() else {
             return;
@@ -4112,6 +4201,24 @@ impl LyruneView {
                 self.settings.last_library_view = Some(view);
                 self.persist_settings();
             }
+        }
+
+        if matches!(
+            playlist.id,
+            UserPlaylistId::FavoriteAlbums | UserPlaylistId::FavoritePlaylists
+        ) {
+            if record_navigation {
+                let target = NavigationPage::Playlist {
+                    playlist: playlist.clone(),
+                    selected_index: Some(index),
+                    scroll_position: PlaylistScrollPosition::top(),
+                    resource: None,
+                };
+                let current = self.current_navigation_page(cx);
+                self.navigation_history.record(current, &target);
+            }
+            self.open_favorite_collection(playlist, Some(index), cx);
+            return;
         }
 
         let resource = self.shared_playlist_resource(
@@ -4474,6 +4581,13 @@ impl LyruneView {
         resource: Option<SharedPlaylistResource>,
         cx: &mut Context<Self>,
     ) {
+        if matches!(
+            playlist.id,
+            UserPlaylistId::FavoriteAlbums | UserPlaylistId::FavoritePlaylists
+        ) {
+            self.open_favorite_collection(playlist, selected_index, cx);
+            return;
+        }
         self.main_content = MainContent::Playlist;
         self.search_resource = None;
         self.artist_resource = None;
@@ -6278,6 +6392,11 @@ impl LyruneView {
         self.profile = None;
         self.qr_image = None;
         self.library_loading = false;
+        self.favorite_collection.clear();
+        self.favorite_collection_loading = false;
+        self.favorite_collection_loaded = false;
+        self.favorite_collection_error = None;
+        self.favorite_collection_generation = self.favorite_collection_generation.wrapping_add(1);
         self.main_content = MainContent::Home;
         self.navigation_history.clear();
         self.home_playlists.clear();
@@ -6956,34 +7075,56 @@ impl LyruneView {
             .bg(theme.sidebar)
             .child(logo)
             .child(
-                h_flex().h(px(60.)).px_5().justify_between().child(
-                    h_flex()
-                        .gap_3()
-                        .child(
-                            div()
-                                .size(px(34.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(media_icon_hsla(
-                                    MediaIcon::Library,
+                h_flex()
+                    .h(px(60.))
+                    .px_5()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(34.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(media_icon_hsla(
+                                        MediaIcon::Library,
+                                        theme.secondary_foreground,
+                                        px(20.),
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(div().font_semibold().child("音乐库"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("你的 QQ 音乐歌单"),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        Button::new("reload-library")
+                            .ghost()
+                            .rounded(px(999.))
+                            .size(px(44.))
+                            .p_0()
+                            .tooltip("重新加载歌单")
+                            .disabled(self.library_loading)
+                            .loading(self.library_loading)
+                            .when(!self.library_loading, |button| {
+                                button.child(media_icon_hsla(
+                                    MediaIcon::Refresh,
                                     theme.secondary_foreground,
-                                    px(20.),
-                                )),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_0p5()
-                                .child(div().font_semibold().child("音乐库"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child("你的 QQ 音乐歌单"),
-                                ),
-                        ),
-                ),
+                                    px(18.),
+                                ))
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.load_library(true, cx))),
+                    ),
             )
             .child(
                 div()
@@ -7014,6 +7155,10 @@ impl LyruneView {
                 .child("从左侧选择一个歌单")
                 .into_any_element();
         };
+        let is_favorite_collection = matches!(
+            playlist.id,
+            UserPlaylistId::FavoriteAlbums | UserPlaylistId::FavoritePlaylists
+        );
         let cover_size = if narrow {
             px(112.)
         } else if compact {
@@ -7050,7 +7195,11 @@ impl LyruneView {
         });
         let owner_identity = owner.zip(owner_avatar_url);
         let has_owner = owner_identity.is_some();
-        let has_tracks = !self.track_table.read(cx).delegate().tracks().is_empty();
+        let has_tracks = if is_favorite_collection {
+            !self.favorite_collection.is_empty()
+        } else {
+            !self.track_table.read(cx).delegate().tracks().is_empty()
+        };
         let long_title = playlist_title_is_long(&playlist.title);
         let title_size = if long_title {
             if narrow {
@@ -7124,7 +7273,8 @@ impl LyruneView {
                                         .text_color(theme.muted_foreground)
                                         .child(match &playlist.id {
                                             UserPlaylistId::Artist { .. } => "歌手",
-                                            UserPlaylistId::Album { .. } => "专辑",
+                                            UserPlaylistId::Album { .. }
+                                            | UserPlaylistId::FavoriteAlbums => "专辑",
                                             _ => "歌单",
                                         }),
                                 ),
@@ -7169,39 +7319,76 @@ impl LyruneView {
                                         div()
                                             .font_normal()
                                             .text_color(theme.secondary_foreground)
-                                            .child(format!(
-                                                "{}{} 首歌曲",
-                                                if has_owner { "· " } else { "" },
-                                                playlist.track_count
-                                            )),
+                                            .child(if is_favorite_collection {
+                                                match &playlist.id {
+                                                    UserPlaylistId::FavoritePlaylists => format!(
+                                                        "{} 个歌单",
+                                                        self.favorite_collection.len()
+                                                    ),
+                                                    _ => format!(
+                                                        "{} 张专辑",
+                                                        self.favorite_collection.len()
+                                                    ),
+                                                }
+                                            } else {
+                                                format!(
+                                                    "{}{} 首歌曲",
+                                                    if has_owner { "· " } else { "" },
+                                                    playlist.track_count
+                                                )
+                                            }),
                                     ),
                             )
                             .child(
-                                h_flex().pt_2().child(
-                                    Button::new("play-all")
-                                        .primary()
-                                        .rounded(px(999.))
-                                        .h(px(44.))
-                                        .min_w(px(44.))
-                                        .px_4()
-                                        .tooltip("从第一首开始播放")
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .text_color(theme.primary_foreground)
-                                                .child(media_icon(
-                                                    MediaIcon::Play,
-                                                    self.color_theme.palette().primary_foreground,
-                                                    px(17.),
-                                                ))
-                                                .child("播放全部"),
+                                h_flex()
+                                    .pt_2()
+                                    .gap_2()
+                                    .when(!is_favorite_collection, |row| {
+                                        row.child(
+                                            Button::new("play-all")
+                                                .primary()
+                                                .rounded(px(999.))
+                                                .h(px(44.))
+                                                .min_w(px(44.))
+                                                .px_4()
+                                                .tooltip("从第一首开始播放")
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .text_color(theme.primary_foreground)
+                                                        .child(media_icon(
+                                                            MediaIcon::Play,
+                                                            self.color_theme
+                                                                .palette()
+                                                                .primary_foreground,
+                                                            px(17.),
+                                                        ))
+                                                        .child("播放全部"),
+                                                )
+                                                .when(!has_tracks, |button| {
+                                                    button.bg(theme.button_primary)
+                                                })
+                                                .disabled(!has_tracks)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.select_track(0, cx)
+                                                })),
                                         )
-                                        .when(!has_tracks, |button| button.bg(theme.button_primary))
-                                        .disabled(!has_tracks)
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.select_track(0, cx)),
-                                        ),
-                                ),
+                                    })
+                                    .when(is_favorite_collection, |row| {
+                                        row.child(
+                                            Button::new("reload-favorite-albums")
+                                                .outline()
+                                                .rounded(px(999.))
+                                                .h(px(44.))
+                                                .px_4()
+                                                .label("刷新")
+                                                .disabled(self.favorite_collection_loading)
+                                                .loading(self.favorite_collection_loading)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.load_favorite_collection(true, cx)
+                                                })),
+                                        )
+                                    }),
                             ),
                     ),
             )
@@ -7215,6 +7402,14 @@ impl LyruneView {
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.selected_playlist.as_ref().is_some_and(|playlist| {
+            matches!(
+                playlist.id,
+                UserPlaylistId::FavoriteAlbums | UserPlaylistId::FavoritePlaylists
+            )
+        }) {
+            return self.render_favorite_collection_content(compact, narrow, scale_factor, cx);
+        }
         let theme = cx.theme().clone();
         v_flex()
             .flex_1()
@@ -7234,6 +7429,145 @@ impl LyruneView {
                                 .stripe(false)
                                 .with_size(px(64.)),
                         ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_favorite_collection_content(
+        &mut self,
+        compact: bool,
+        narrow: bool,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let icon = if self
+            .selected_playlist
+            .as_ref()
+            .is_some_and(|playlist| playlist.id == UserPlaylistId::FavoritePlaylists)
+        {
+            MediaIcon::Playlist
+        } else {
+            MediaIcon::Album
+        };
+        let items = self.favorite_collection.clone();
+        let cover_size = if compact { px(132.) } else { px(148.) };
+        let card_width = cover_size + px(16.);
+        let cards = items
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let title = item.title.clone();
+                let subtitle = item.owner.clone();
+                let cover = self.render_search_cover(
+                    item.cover_url.clone(),
+                    icon,
+                    cover_size,
+                    px(12.),
+                    scale_factor,
+                    cx,
+                );
+                Button::new(format!("favorite-collection-{index}"))
+                    .ghost()
+                    .w(card_width)
+                    .h(cover_size + px(74.))
+                    .p_2()
+                    .rounded(px(12.))
+                    .tooltip(title.clone())
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_start()
+                            .gap_2()
+                            .child(cover)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_home_playlist(item.clone(), window, cx)
+                    }))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let loading = self.favorite_collection_loading;
+        let error = self.favorite_collection_error.clone();
+        let has_items = !self.favorite_collection.is_empty();
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(self.render_playlist_header(compact, narrow, scale_factor, cx))
+            .child(
+                div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(1120.))
+                        .mx_auto()
+                        .px(if narrow { px(20.) } else { px(32.) })
+                        .pt(if narrow { px(20.) } else { px(28.) })
+                        .pb_8()
+                        .gap_5()
+                        .when(loading && !has_items, |this| {
+                            this.child(
+                                v_flex()
+                                    .h(px(260.))
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_3()
+                                    .text_color(theme.muted_foreground)
+                                    .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                                    .child("正在加载收藏…"),
+                            )
+                        })
+                        .when(!loading && !has_items, |this| {
+                            this.child(
+                                v_flex()
+                                    .h(px(260.))
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_4()
+                                    .text_color(theme.muted_foreground)
+                                    .child(error.clone().unwrap_or_else(|| "还没有收藏".to_owned()))
+                                    .when(error.is_some(), |this| {
+                                        this.child(
+                                            Button::new("retry-favorite-collection")
+                                                .outline()
+                                                .h(px(44.))
+                                                .px_4()
+                                                .label("重新加载")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.load_favorite_collection(true, cx)
+                                                })),
+                                        )
+                                    }),
+                            )
+                        })
+                        .when(has_items, |this| {
+                            this.child(
+                                h_flex()
+                                    .w_full()
+                                    .items_start()
+                                    .flex_wrap()
+                                    .gap_4()
+                                    .children(cards),
+                            )
+                        }),
                 ),
             )
             .into_any_element()

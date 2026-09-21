@@ -374,6 +374,37 @@ impl ProtocolClient {
             .filter_map(parse_created_playlist)
             .collect::<Vec<_>>();
 
+        let mut seen = HashSet::new();
+        let mut playlists = Vec::with_capacity(3 + created.len());
+        for entry in [
+            liked,
+            UserPlaylist::favorite_albums(),
+            UserPlaylist::favorite_playlists(),
+        ] {
+            seen.insert(entry.id.clone());
+            playlists.push(entry);
+        }
+        for playlist in created {
+            if seen.insert(playlist.id.clone()) {
+                playlists.push(playlist);
+            }
+        }
+        Ok(playlists)
+    }
+
+    pub async fn favorite_playlists(
+        &self,
+        credential: &CredentialSession,
+    ) -> Result<Vec<UserPlaylist>> {
+        let current = credential.ensure_fresh().await?;
+        self.fetch_favorite_playlists(credential, &current).await
+    }
+
+    async fn fetch_favorite_playlists(
+        &self,
+        credential: &CredentialSession,
+        current: &QqCredential,
+    ) -> Result<Vec<UserPlaylist>> {
         let mut favorites = Vec::new();
         let mut offset = 0_u64;
         loop {
@@ -387,7 +418,7 @@ impl ProtocolClient {
                         "size": 100,
                     }),
                     credential,
-                    &current,
+                    current,
                     None,
                 )
                 .await
@@ -402,27 +433,18 @@ impl ProtocolClient {
             }
             offset = offset.saturating_add(page.len() as u64);
         }
-
-        let favorite_albums = self.favorite_albums(credential, &current).await?;
-
-        let mut seen = HashSet::new();
-        let mut playlists =
-            Vec::with_capacity(1 + created.len() + favorites.len() + favorite_albums.len());
-        seen.insert(liked.id.clone());
-        playlists.push(liked);
-        for playlist in created
-            .into_iter()
-            .chain(favorites)
-            .chain(favorite_albums)
-        {
-            if seen.insert(playlist.id.clone()) {
-                playlists.push(playlist);
-            }
-        }
-        Ok(playlists)
+        Ok(favorites)
     }
 
-    async fn favorite_albums(
+    pub async fn favorite_albums(
+        &self,
+        credential: &CredentialSession,
+    ) -> Result<Vec<UserPlaylist>> {
+        let current = credential.ensure_fresh().await?;
+        self.fetch_favorite_albums(credential, &current).await
+    }
+
+    async fn fetch_favorite_albums(
         &self,
         credential: &CredentialSession,
         current: &QqCredential,
@@ -1016,6 +1038,8 @@ impl ProtocolClient {
             }
             UserPlaylistId::Artist { .. }
             | UserPlaylistId::Album { .. }
+            | UserPlaylistId::FavoriteAlbums
+            | UserPlaylistId::FavoritePlaylists
             | UserPlaylistId::Search { .. }
             | UserPlaylistId::Recommendation { .. } => {
                 bail!("该媒体集合不使用歌单详情接口")
