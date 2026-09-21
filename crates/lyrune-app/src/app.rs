@@ -2300,9 +2300,9 @@ pub struct LyruneView {
     library_cache: LibraryCache,
     favorite_collection: Vec<UserPlaylist>,
     favorite_collection_loading: bool,
-    favorite_collection_loaded: bool,
     favorite_collection_error: Option<String>,
     favorite_collection_generation: u64,
+    favorite_collection_scroll: UniformListScrollHandle,
     page_resource_cache: PageResourceCache,
     liked_tracks: HashMap<String, bool>,
     liked_state_loading: HashSet<String>,
@@ -2650,9 +2650,9 @@ impl LyruneView {
             library_cache,
             favorite_collection: Vec::new(),
             favorite_collection_loading: false,
-            favorite_collection_loaded: false,
             favorite_collection_error: None,
             favorite_collection_generation: 0,
+            favorite_collection_scroll: UniformListScrollHandle::default(),
             page_resource_cache: PageResourceCache::default(),
             liked_tracks: HashMap::new(),
             liked_state_loading: HashSet::new(),
@@ -3983,10 +3983,7 @@ impl LyruneView {
         .detach();
     }
 
-    fn load_favorite_collection(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
-        if self.favorite_collection_loading || (!force_refresh && self.favorite_collection_loaded) {
-            return;
-        }
+    fn load_favorite_collection(&mut self, cx: &mut Context<Self>) {
         let is_playlists = match self.selected_playlist.as_ref().map(|playlist| &playlist.id) {
             Some(UserPlaylistId::FavoriteAlbums) => false,
             Some(UserPlaylistId::FavoritePlaylists) => true,
@@ -4028,7 +4025,6 @@ impl LyruneView {
                 match result {
                     Ok(items) => {
                         this.favorite_collection = items;
-                        this.favorite_collection_loaded = true;
                     }
                     Err(error) => {
                         this.favorite_collection_error = Some(format!("加载收藏失败：{error:#}"));
@@ -4058,7 +4054,9 @@ impl LyruneView {
                 cx.notify();
             });
         }
-        self.load_favorite_collection(true, cx);
+        self.favorite_collection_scroll = UniformListScrollHandle::default();
+        self.favorite_collection.clear();
+        self.load_favorite_collection(cx);
         cx.notify();
     }
 
@@ -6394,7 +6392,6 @@ impl LyruneView {
         self.library_loading = false;
         self.favorite_collection.clear();
         self.favorite_collection_loading = false;
-        self.favorite_collection_loaded = false;
         self.favorite_collection_error = None;
         self.favorite_collection_generation = self.favorite_collection_generation.wrapping_add(1);
         self.main_content = MainContent::Home;
@@ -7385,7 +7382,7 @@ impl LyruneView {
                                                 .disabled(self.favorite_collection_loading)
                                                 .loading(self.favorite_collection_loading)
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.load_favorite_collection(true, cx)
+                                                    this.load_favorite_collection(cx)
                                                 })),
                                         )
                                     }),
@@ -7400,6 +7397,8 @@ impl LyruneView {
         compact: bool,
         narrow: bool,
         scale_factor: f32,
+        window: &Window,
+        sidebar_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.selected_playlist.as_ref().is_some_and(|playlist| {
@@ -7408,7 +7407,14 @@ impl LyruneView {
                 UserPlaylistId::FavoriteAlbums | UserPlaylistId::FavoritePlaylists
             )
         }) {
-            return self.render_favorite_collection_content(compact, narrow, scale_factor, cx);
+            return self.render_favorite_collection_content(
+                compact,
+                narrow,
+                scale_factor,
+                window,
+                sidebar_width,
+                cx,
+            );
         }
         let theme = cx.theme().clone();
         v_flex()
@@ -7439,6 +7445,8 @@ impl LyruneView {
         compact: bool,
         narrow: bool,
         scale_factor: f32,
+        window: &Window,
+        sidebar_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -7454,122 +7462,134 @@ impl LyruneView {
         let items = self.favorite_collection.clone();
         let cover_size = if compact { px(132.) } else { px(148.) };
         let card_width = cover_size + px(16.);
-        let cards = items
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let title = item.title.clone();
-                let subtitle = item.owner.clone();
-                let cover = self.render_search_cover(
-                    item.cover_url.clone(),
-                    icon,
-                    cover_size,
-                    px(12.),
-                    scale_factor,
-                    cx,
-                );
-                Button::new(format!("favorite-collection-{index}"))
-                    .ghost()
-                    .w(card_width)
-                    .h(cover_size + px(74.))
-                    .p_2()
-                    .rounded(px(12.))
-                    .tooltip(title.clone())
-                    .child(
-                        v_flex()
-                            .size_full()
-                            .items_start()
-                            .gap_2()
-                            .child(cover)
-                            .child(
-                                div()
-                                    .w_full()
-                                    .truncate()
-                                    .font_medium()
-                                    .text_color(theme.foreground)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(subtitle),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_home_playlist(item.clone(), window, cx)
-                    }))
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
+        let card_height = cover_size + px(74.);
+        let gap = 16.;
+        let horizontal_padding = if narrow { 20. } else { 32. };
+        let available = f32::from(window.viewport_size().width)
+            - f32::from(sidebar_width)
+            - horizontal_padding * 2.
+            - 16.;
+        let columns =
+            (((available + gap) / (f32::from(card_width) + gap)).floor() as i32).max(1) as usize;
+        let row_count = items.len().div_ceil(columns);
         let loading = self.favorite_collection_loading;
         let error = self.favorite_collection_error.clone();
-        let has_items = !self.favorite_collection.is_empty();
+        let has_items = !items.is_empty();
+        let card_theme = theme.clone();
+        let body = if loading && !has_items {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_color(theme.muted_foreground)
+                .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                .child("正在加载收藏…")
+                .into_any_element()
+        } else if !has_items {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .text_color(theme.muted_foreground)
+                .child(error.clone().unwrap_or_else(|| "还没有收藏".to_owned()))
+                .when(error.is_some(), |this| {
+                    this.child(
+                        Button::new("retry-favorite-collection")
+                            .outline()
+                            .h(px(44.))
+                            .px_4()
+                            .label("重新加载")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.load_favorite_collection(cx)),
+                            ),
+                    )
+                })
+                .into_any_element()
+        } else {
+            uniform_list(
+                "favorite-collection",
+                row_count,
+                cx.processor(move |this, range: Range<usize>, _window, cx| {
+                    range
+                        .map(|row| {
+                            let start = row * columns;
+                            let end = (start + columns).min(items.len());
+                            let cells = items[start..end]
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, item)| {
+                                    let index = start + offset;
+                                    let title = item.title.clone();
+                                    let subtitle = item.owner.clone();
+                                    let cover = this.render_search_cover(
+                                        item.cover_url.clone(),
+                                        icon,
+                                        cover_size,
+                                        px(12.),
+                                        scale_factor,
+                                        cx,
+                                    );
+                                    let playlist = item.clone();
+                                    Button::new(format!("favorite-collection-{index}"))
+                                        .ghost()
+                                        .w(card_width)
+                                        .h(card_height)
+                                        .p_2()
+                                        .rounded(px(12.))
+                                        .tooltip(title.clone())
+                                        .child(
+                                            v_flex()
+                                                .size_full()
+                                                .items_start()
+                                                .gap_2()
+                                                .child(cover)
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .truncate()
+                                                        .font_medium()
+                                                        .text_color(card_theme.foreground)
+                                                        .child(title),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(card_theme.muted_foreground)
+                                                        .child(subtitle),
+                                                ),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.open_home_playlist(playlist.clone(), window, cx)
+                                        }))
+                                        .into_any_element()
+                                })
+                                .collect::<Vec<_>>();
+                            h_flex()
+                                .w_full()
+                                .gap_4()
+                                .pb_4()
+                                .children(cells)
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .track_scroll(&self.favorite_collection_scroll)
+            .flex_1()
+            .min_h_0()
+            .into_any_element()
+        };
         v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme.background)
             .child(self.render_playlist_header(compact, narrow, scale_factor, cx))
-            .child(
-                div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(1120.))
-                        .mx_auto()
-                        .px(if narrow { px(20.) } else { px(32.) })
-                        .pt(if narrow { px(20.) } else { px(28.) })
-                        .pb_8()
-                        .gap_5()
-                        .when(loading && !has_items, |this| {
-                            this.child(
-                                v_flex()
-                                    .h(px(260.))
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_3()
-                                    .text_color(theme.muted_foreground)
-                                    .child(Spinner::new().with_size(px(24.)).color(theme.primary))
-                                    .child("正在加载收藏…"),
-                            )
-                        })
-                        .when(!loading && !has_items, |this| {
-                            this.child(
-                                v_flex()
-                                    .h(px(260.))
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_4()
-                                    .text_color(theme.muted_foreground)
-                                    .child(error.clone().unwrap_or_else(|| "还没有收藏".to_owned()))
-                                    .when(error.is_some(), |this| {
-                                        this.child(
-                                            Button::new("retry-favorite-collection")
-                                                .outline()
-                                                .h(px(44.))
-                                                .px_4()
-                                                .label("重新加载")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.load_favorite_collection(true, cx)
-                                                })),
-                                        )
-                                    }),
-                            )
-                        })
-                        .when(has_items, |this| {
-                            this.child(
-                                h_flex()
-                                    .w_full()
-                                    .items_start()
-                                    .flex_wrap()
-                                    .gap_4()
-                                    .children(cards),
-                            )
-                        }),
-                ),
-            )
+            .child(body)
             .into_any_element()
     }
 
@@ -10300,9 +10320,14 @@ impl LyruneView {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
             MainContent::Search => self.render_search(compact, narrow, scale_factor, cx),
             MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
-            MainContent::Playlist => {
-                self.render_playlist_content(compact, narrow, scale_factor, cx)
-            }
+            MainContent::Playlist => self.render_playlist_content(
+                compact,
+                narrow,
+                scale_factor,
+                window,
+                sidebar_width,
+                cx,
+            ),
             MainContent::Settings => self.render_settings_page(narrow, cx),
         };
         let search_width = if narrow {
